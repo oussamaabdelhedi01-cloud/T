@@ -1,0 +1,256 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Write project files
+        run: |
+          mkdir -p app/src/main/java/com/trader/bridge
+          cat > settings.gradle <<'EOF_FILE'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "TraderBridge"
+          include ':app'
+          EOF_FILE
+          cat > build.gradle <<'EOF_FILE'
+          plugins {
+              id 'com.android.application' version '8.5.2' apply false
+          }
+          EOF_FILE
+          cat > gradle.properties <<'EOF_FILE'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=false
+          EOF_FILE
+          cat > app/build.gradle <<'EOF_FILE'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.trader.bridge'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId 'com.trader.bridge'
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName '1.0'
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          EOF_FILE
+          cat > app/src/main/AndroidManifest.xml <<'EOF_FILE'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+
+              <application
+                  android:label="Trader Bridge"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@android:style/Theme.DeviceDefault">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+              </application>
+          </manifest>
+          EOF_FILE
+          cat > app/src/main/java/com/trader/bridge/MainActivity.java <<'EOF_FILE'
+          package com.trader.bridge;
+
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.content.SharedPreferences;
+          import android.graphics.Color;
+          import android.os.Bundle;
+          import android.text.InputType;
+          import android.view.Menu;
+          import android.view.MenuItem;
+          import android.webkit.JsPromptResult;
+          import android.webkit.JsResult;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceError;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.EditText;
+
+          /** Thin wrapper: opens the phone app served by your bridge program (MT5 or Binance). */
+          public class MainActivity extends Activity {
+
+              private static final String ERROR_HTML =
+                  "<html><body style='background:#0e1116;color:#e6e9ee;font-family:sans-serif;padding:24px'>"
+                  + "<h3>Cannot reach your bridge</h3>"
+                  + "<p>Check that the bridge program is running on your computer and that Wi-Fi or Tailscale is on.</p>"
+                  + "<p>Menu &rarr; <b>Change server</b> to edit the address, or <b>Reload</b> to retry.</p>"
+                  + "</body></html>";
+
+              private WebView web;
+              private SharedPreferences prefs;
+
+              @Override
+              protected void onCreate(Bundle state) {
+                  super.onCreate(state);
+                  prefs = getSharedPreferences("cfg", MODE_PRIVATE);
+
+                  web = new WebView(this);
+                  setContentView(web);
+                  web.setBackgroundColor(Color.parseColor("#0e1116"));
+
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);   // the page keeps your access token in localStorage
+
+                  web.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public void onReceivedError(WebView v, WebResourceRequest r, WebResourceError e) {
+                          if (r.isForMainFrame()) {
+                              v.loadDataWithBaseURL(null, ERROR_HTML, "text/html", "UTF-8", null);
+                          }
+                      }
+                  });
+
+                  // The web app uses confirm() before every order and prompt() for the token,
+                  // so these dialogs must be implemented here.
+                  web.setWebChromeClient(new WebChromeClient() {
+                      @Override
+                      public boolean onJsAlert(WebView v, String url, String msg, final JsResult r) {
+                          new AlertDialog.Builder(MainActivity.this)
+                              .setMessage(msg)
+                              .setPositiveButton("OK", (d, w) -> r.confirm())
+                              .setOnCancelListener(d -> r.cancel())
+                              .show();
+                          return true;
+                      }
+
+                      @Override
+                      public boolean onJsConfirm(WebView v, String url, String msg, final JsResult r) {
+                          new AlertDialog.Builder(MainActivity.this)
+                              .setMessage(msg)
+                              .setPositiveButton("OK", (d, w) -> r.confirm())
+                              .setNegativeButton("Cancel", (d, w) -> r.cancel())
+                              .setOnCancelListener(d -> r.cancel())
+                              .show();
+                          return true;
+                      }
+
+                      @Override
+                      public boolean onJsPrompt(WebView v, String url, String msg, String def, final JsPromptResult r) {
+                          final EditText in = new EditText(MainActivity.this);
+                          in.setSingleLine(true);
+                          boolean secret = msg != null && msg.toLowerCase().contains("token");
+                          in.setInputType(InputType.TYPE_CLASS_TEXT
+                              | (secret ? InputType.TYPE_TEXT_VARIATION_PASSWORD : InputType.TYPE_TEXT_VARIATION_NORMAL));
+                          if (def != null) in.setText(def);
+                          new AlertDialog.Builder(MainActivity.this)
+                              .setMessage(msg)
+                              .setView(in)
+                              .setPositiveButton("OK", (d, w) -> r.confirm(in.getText().toString()))
+                              .setNegativeButton("Cancel", (d, w) -> r.cancel())
+                              .setOnCancelListener(d -> r.cancel())
+                              .show();
+                          return true;
+                      }
+                  });
+
+                  load();
+              }
+
+              private void load() {
+                  String url = prefs.getString("url", "");
+                  if (url.isEmpty()) askUrl(); else web.loadUrl(url);
+              }
+
+              private void askUrl() {
+                  final EditText in = new EditText(this);
+                  in.setSingleLine(true);
+                  in.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+                  in.setHint("http://100.x.x.x:8081/");
+                  in.setText(prefs.getString("url", ""));
+                  new AlertDialog.Builder(this)
+                      .setTitle("Bridge address")
+                      .setMessage("Address of the computer running your bridge program (Tailscale or Wi-Fi address, port 8081).")
+                      .setView(in)
+                      .setCancelable(prefs.contains("url"))
+                      .setPositiveButton("Connect", (d, w) -> {
+                          String u = in.getText().toString().trim();
+                          if (u.isEmpty()) return;
+                          if (!u.startsWith("http")) u = "http://" + u;
+                          prefs.edit().putString("url", u).apply();
+                          web.loadUrl(u);
+                      })
+                      .show();
+              }
+
+              @Override
+              public boolean onCreateOptionsMenu(Menu m) {
+                  m.add(0, 1, 0, "Reload");
+                  m.add(0, 2, 1, "Change server");
+                  m.add(0, 3, 2, "Forget token");
+                  return true;
+              }
+
+              @Override
+              public boolean onOptionsItemSelected(MenuItem item) {
+                  switch (item.getItemId()) {
+                      case 1: load(); return true;
+                      case 2: askUrl(); return true;
+                      case 3:
+                          web.evaluateJavascript("localStorage.removeItem('mt5tok');location.reload();", null);
+                          return true;
+                      default: return super.onOptionsItemSelected(item);
+                  }
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (web.canGoBack()) web.goBack(); else super.onBackPressed();
+              }
+          }
+          EOF_FILE
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - run: gradle --no-daemon assembleDebug
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Trader Bridge build ${{ github.run_number }}
+          files: app/build/outputs/apk/debug/app-debug.apk
